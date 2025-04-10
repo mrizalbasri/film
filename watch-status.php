@@ -1,55 +1,69 @@
 <?php
-// Database connection
-include "database.php"; 
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+// Database connection (procedural style)
+include "database.php";
 
-// Filter handling
-$whereClause = "";
-$orderBy = "ORDER BY watch_date DESC";
-
-if (isset($_GET['filter']) && !empty($_GET['filter'])) {
-    switch ($_GET['filter']) {
-        case 'watched':
-            $whereClause = "WHERE is_watched = 1";
-            break;
-        case 'unwatched':
-            $whereClause = "WHERE is_watched = 0";
-            break;
-        case 'highest':
-            $whereClause = "WHERE personal_rating IS NOT NULL";
-            $orderBy = "ORDER BY personal_rating DESC, watch_date DESC";
-            break;
-        case 'recent':
-            $orderBy = "ORDER BY watch_date DESC";
-            break;
+// Handle delete operation
+if (isset($_GET['delete_id']) && !empty($_GET['delete_id'])) {
+    $delete_id = mysqli_real_escape_string($conn, $_GET['delete_id']);
+    
+    // Perform the delete operation
+    $delete_sql = "DELETE FROM watchstatus WHERE watch_id = '$delete_id'";
+    
+    if (mysqli_query($conn, $delete_sql)) {
+        // Set success message
+        $success_message = "Record deleted successfully.";
+    } else {
+        // Set error message
+        $error_message = "Error deleting record: " . mysqli_error($conn);
     }
+    
+    // Redirect to remove the delete_id parameter from URL
+    header("Location: watch-status.php");
+    exit;
 }
 
-// Search functionality
-if (isset($_GET['search']) && !empty($_GET['search'])) {
-    $search = $conn->real_escape_string($_GET['search']);
-    $whereClause = ($whereClause == "") ? "WHERE " : $whereClause . " AND ";
-    $whereClause .= "film_id LIKE '%$search%'";
+// Initialize variables
+$filter = isset($_GET['filter']) ? $_GET['filter'] : '';
+$whereClause = '';
+$orderClause = 'ORDER BY watch_date DESC';
+
+// Apply filters
+switch ($filter) {
+    case 'watched':
+        $whereClause = 'WHERE is_watched = 1';
+        break;
+    case 'unwatched':
+        $whereClause = 'WHERE is_watched = 0';
+        break;
+    case 'highest':
+        $whereClause = 'WHERE personal_rating IS NOT NULL';
+        $orderClause = 'ORDER BY personal_rating DESC';
+        break;
+    case 'recent':
+        $orderClause = 'ORDER BY watch_date DESC';
+        break;
+    default:
+        // No filter or 'all' selected
+        break;
 }
 
-// Pagination
-$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$perPage = 10;
-$offset = ($page - 1) * $perPage;
+// Prepare and execute the main query with filters
+$sql = "SELECT ws.watch_id, ws.film_id, ws.watch_date, ws.is_watched, ws.personal_rating, ws.notes, 
+               f.title as film_title
+        FROM watchstatus ws
+        LEFT JOIN films f ON ws.film_id = f.film_id
+        $whereClause 
+        $orderClause";
 
-// Main query with pagination
-$sql = "SELECT watch_id, film_id, watch_date, is_watched, personal_rating, notes 
-        FROM watchstatus 
-        $whereClause
-        $orderBy
-        LIMIT $offset, $perPage";
+$result = mysqli_query($conn, $sql);
 
-$result = $conn->query($sql);
-
-// Count total records for pagination
-$countSql = "SELECT COUNT(*) as total FROM watchstatus $whereClause";
-$countResult = $conn->query($countSql);
-$totalRecords = $countResult->fetch_assoc()['total'];
-$totalPages = ceil($totalRecords / $perPage);
+// Handle database query error
+if (!$result) {
+    $error_message = "Error: " . mysqli_error($conn);
+}
 
 // Query to get watch statistics
 $statsQuery = "SELECT 
@@ -59,8 +73,60 @@ $statsQuery = "SELECT
     COUNT(DISTINCT film_id) as unique_films
     FROM watchstatus";
     
-$statsResult = $conn->query($statsQuery);
-$stats = $statsResult->fetch_assoc();
+$statsResult = mysqli_query($conn, $statsQuery);
+$stats = mysqli_fetch_assoc($statsResult);
+
+// Get monthly statistics with better error handling
+$monthlyStats = "SELECT 
+    DATE_FORMAT(watch_date, '%Y-%m') as month_year,
+    COUNT(*) as total,
+    SUM(CASE WHEN is_watched = 1 THEN 1 ELSE 0 END) as watched,
+    SUM(CASE WHEN is_watched = 0 THEN 1 ELSE 0 END) as not_watched,
+    ROUND(AVG(personal_rating), 1) as avg_rating
+FROM watchstatus
+WHERE watch_date IS NOT NULL
+GROUP BY DATE_FORMAT(watch_date, '%Y-%m')
+ORDER BY month_year DESC
+LIMIT 6";
+
+$monthlyResult = mysqli_query($conn, $monthlyStats);
+
+// Get rating distribution with better error handling
+$ratingDistribution = "SELECT 
+    CASE 
+        WHEN personal_rating BETWEEN 0 AND 2 THEN '0-2'
+        WHEN personal_rating BETWEEN 2.1 AND 4 THEN '2.1-4'
+        WHEN personal_rating BETWEEN 4.1 AND 6 THEN '4.1-6'
+        WHEN personal_rating BETWEEN 6.1 AND 8 THEN '6.1-8'
+        WHEN personal_rating BETWEEN 8.1 AND 10 THEN '8.1-10'
+        ELSE 'Not Rated'
+    END as rating_range,
+    COUNT(*) as count
+FROM watchstatus
+GROUP BY rating_range
+ORDER BY FIELD(rating_range, '0-2', '2.1-4', '4.1-6', '6.1-8', '8.1-10', 'Not Rated')";
+
+$ratingResult = mysqli_query($conn, $ratingDistribution);
+
+// Calculate total rated films for percentages
+$totalRated = 0;
+$ratingData = array();
+
+if ($ratingResult && mysqli_num_rows($ratingResult) > 0) {
+    while($ratingRow = mysqli_fetch_assoc($ratingResult)) {
+        if ($ratingRow["rating_range"] != 'Not Rated') {
+            $totalRated += $ratingRow["count"];
+        }
+        $ratingData[] = $ratingRow;
+    }
+}
+
+// Get recently added films (for the "new films" section)
+$recentFilmsQuery = "SELECT ws.film_id, f.title, ws.watch_date, ws.is_watched 
+                     FROM watchstatus ws
+                     JOIN films f ON ws.film_id = f.film_id
+                     ORDER BY ws.watch_id DESC LIMIT 5";
+$recentFilmsResult = mysqli_query($conn, $recentFilmsQuery);
 ?>
 
 <!DOCTYPE html>
@@ -73,267 +139,74 @@ $stats = $statsResult->fetch_assoc();
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <!-- Google Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Chart.js -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
-        body {
-            font-family: 'Poppins', sans-serif;
-            background-color: #f8f9fa;
-            color: #333;
-        }
-        
-        .sidebar {
-            min-height: 100vh;
-            background-color: #2c3e50;
-            box-shadow: 0 0 15px rgba(0,0,0,0.1);
-            position: fixed;
-            z-index: 100;
-            padding-top: 20px;
-        }
-        
-        .sidebar .nav-link {
-            color: #ecf0f1;
-            padding: 12px 20px;
-            border-radius: 8px;
-            margin: 5px 10px;
-            transition: all 0.3s ease;
-        }
-        
-        .sidebar .nav-link:hover,
-        .sidebar .nav-link.active {
-            background-color: #3498db;
-            color: white;
-            transform: translateX(5px);
-        }
-        
-        .sidebar .nav-link i {
-            margin-right: 10px;
-            width: 20px;
-            text-align: center;
-        }
-        
-        .sidebar-brand {
-            padding: 15px 20px;
-            margin-bottom: 20px;
-            color: white;
-            border-bottom: 1px solid rgba(255,255,255,0.1);
-        }
-        
-        .sidebar-brand h4 {
-            margin: 0;
-            font-weight: 600;
-            font-size: 1.5rem;
-        }
-        
-        main {
-            margin-left: 230px;
-            padding: 20px;
-        }
-        
-        .page-header {
-            background-color: white;
-            padding: 20px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        }
-        
         .dashboard-card {
-            border-radius: 10px;
-            border: none;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.05);
             transition: all 0.3s;
-            height: 100%;
+            border-radius: 10px;
+            overflow: hidden;
         }
-        
         .dashboard-card:hover {
-            transform: translateY(-7px);
-            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.15);
         }
-        
-        .card-body {
-            padding: 25px;
-        }
-        
         .rating-star {
-            color: #f39c12;
+            color: #ffc107;
         }
-        
         .rating-empty {
             color: #e0e0e0;
         }
-        
         .table-responsive {
             overflow-x: auto;
         }
-        
-        .table {
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.03);
-        }
-        
-        .table thead th {
-            background-color: #f8f9fa;
-            border-bottom: 2px solid #e9ecef;
-            font-weight: 600;
-        }
-        
-        .table tbody tr:hover {
-            background-color: rgba(52, 152, 219, 0.05);
-        }
-        
         .watched-badge {
-            background-color: #2ecc71;
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 500;
+            background-color: #28a745;
         }
-        
         .not-watched-badge {
-            background-color: #e74c3c;
-            padding: 5px 10px;
-            border-radius: 20px;
-            font-size: 0.75rem;
-            font-weight: 500;
+            background-color: #dc3545;
         }
-        
-        .btn {
-            border-radius: 6px;
-            font-weight: 500;
-            padding: 8px 16px;
-            transition: all 0.2s;
+        .sidebar {
+            min-height: 100vh;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
         }
-        
-        .btn-outline-primary {
-            border-color: #3498db;
-            color: #3498db;
+        .sidebar .nav-link {
+            color: #333;
+            padding: 12px 20px;
+            border-radius: 5px;
+            margin-bottom: 5px;
         }
-        
-        .btn-outline-primary:hover {
-            background-color: #3498db;
+        .sidebar .nav-link:hover,
+        .sidebar .nav-link.active {
+            background-color: #007bff;
             color: white;
         }
-        
-        .btn-sm {
-            padding: 5px 10px;
-            font-size: 0.8rem;
-            border-radius: 4px;
+        .sidebar .nav-link i {
+            margin-right: 10px;
         }
-        
-        .card {
-            border-radius: 10px;
-            border: none;
-            box-shadow: 0 2px 15px rgba(0,0,0,0.05);
-            margin-bottom: 25px;
+        .progress {
+            height: 20px;
         }
-        
-        .card-header {
-            background-color: white;
-            border-bottom: 1px solid rgba(0,0,0,0.05);
-            font-weight: 600;
-            padding: 15px 20px;
-        }
-        
-        .stat-icon {
-            width: 50px;
-            height: 50px;
-            border-radius: 50%;
+        .film-icon-container {
+            width: 48px;
+            height: 48px;
+            border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
-            background-color: rgba(255,255,255,0.3);
         }
-        
-        .progress {
-            height: 8px;
-            border-radius: 4px;
-            background-color: rgba(0,0,0,0.1);
-        }
-        
-        .progress-bar {
-            border-radius: 4px;
-        }
-        
-        .search-box {
-            border-radius: 20px;
-            border: 1px solid #e0e0e0;
-            padding: 8px 15px;
-            width: 100%;
-            transition: all 0.3s;
-        }
-        
-        .search-box:focus {
-            border-color: #3498db;
-            box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.25);
-            outline: none;
-        }
-        
-        .search-btn {
-            border-radius: 20px;
-            padding: 8px 20px;
-        }
-        
-        .pagination {
-            margin-top: 20px;
-            justify-content: center;
-        }
-        
-        .page-link {
-            color: #3498db;
-            border-radius: 4px;
-            margin: 0 3px;
-        }
-        
-        .page-item.active .page-link {
-            background-color: #3498db;
-            border-color: #3498db;
-        }
-        
-        .chart-container {
-            position: relative;
-            height: 300px;
-            width: 100%;
-        }
-        
-        .notes-ellipsis {
+        .truncate-text {
             max-width: 150px;
+            white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            white-space: nowrap;
-            display: inline-block;
         }
-        
-        @media (max-width: 768px) {
-            .sidebar {
-                width: 70px;
-                overflow: hidden;
-            }
-            
-            .sidebar .nav-link span {
-                display: none;
-            }
-            
-            .sidebar .nav-link {
-                padding: 15px;
-                text-align: center;
-            }
-            
-            .sidebar .nav-link i {
-                margin: 0;
-                font-size: 1.2rem;
-            }
-            
-            .sidebar-brand {
-                display: none;
-            }
-            
-            main {
-                margin-left: 70px;
-            }
+        .notes-tooltip {
+            cursor: pointer;
+        }
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 9999;
         }
     </style>
 </head>
@@ -341,176 +214,169 @@ $stats = $statsResult->fetch_assoc();
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->
-            <div class="col-md-3 col-lg-2 sidebar">
-                <div class="sidebar-brand">
-                    <h4><i class="fas fa-film"></i> FilmTracker</h4>
+            <div class="col-md-3 col-lg-2 d-md-block bg-light sidebar collapse">
+                <div class="position-sticky pt-3">
+                    <div class="text-center mb-4">
+                        <h4>Film Dashboard</h4>
+                    </div>
+                    <ul class="nav flex-column">
+                        <li class="nav-item">
+                            <a class="nav-link" href="filim.php" id="films-link">
+                                <i class="fas fa-film"></i> Film
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="genre.php" id="genres-link">
+                                <i class="fas fa-tags"></i> Genre
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link active" href="watch-status.php" id="status-link">
+                                <i class="fas fa-eye"></i> Watch Status
+                            </a>
+                        </li>
+                    </ul>
                 </div>
-                <ul class="nav flex-column">
-                    <li class="nav-item">
-                        <a class="nav-link" href="dashboard.php">
-                            <i class="fas fa-home"></i> <span>Dashboard</span>
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="films.php">
-                            <i class="fas fa-film"></i> <span>Films</span>
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="genre.php">
-                            <i class="fas fa-tags"></i> <span>Genres</span>
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="watch-status.php">
-                            <i class="fas fa-eye"></i> <span>Watch Status</span>
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="stats.php">
-                            <i class="fas fa-chart-bar"></i> <span>Statistics</span>
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="settings.php">
-                            <i class="fas fa-cog"></i> <span>Settings</span>
-                        </a>
-                    </li>
-                </ul>
+                    <!-- User section at bottom of sidebar -->
+<div class="border-top my-4"></div>
+<div class="user-profile p-3">
+    <?php
+    // Assuming you have a session with user information
+  
+    if(isset($_SESSION['username'])) {
+        $user_name = htmlspecialchars($_SESSION['username']);
+        $user_email = isset($_SESSION['email']) ? htmlspecialchars($_SESSION['email']) : '';
+    ?>
+        <div class="d-flex align-items-center mb-3">
+            <div class="flex-shrink-0">
+                <i class="fas fa-user-circle fa-2x text-primary"></i>
+            </div>
+            <div class="flex-grow-1 ms-3">
+                <h6 class="mb-0"><?= $user_name; ?></h6>
+                <?php if(!empty($user_email)): ?>
+                    <small class="text-muted"><?= $user_email; ?></small>
+                <?php endif; ?>
+            </div>
+        </div>
+        <div class="d-grid gap-2">
+            <a href="profile.php" class="btn btn-sm btn-outline-secondary">
+                <i class="fas fa-user-cog"></i> Profile
+            </a>
+            <a href="logout.php" class="btn btn-sm btn-outline-danger">
+                <i class="fas fa-sign-out-alt"></i> Logout
+            </a>
+        </div>
+    <?php } else { ?>
+        <div class="text-center">
+            <i class="fas fa-user-circle fa-3x text-muted mb-2"></i>
+            <p>Please login to continue</p>
+            <a href="login.php" class="btn btn-sm btn-primary">Login</a>
+        </div>
+    <?php } ?>
+</div>
             </div>
             
             <!-- Main Content -->
-            <main>
-                <div class="page-header d-flex justify-content-between align-items-center flex-wrap">
-                    <h1 class="h3 mb-3 mb-md-0">Watch Status Dashboard</h1>
-                    <div class="d-flex gap-2">
-                        <a href="add_watch.php" class="btn btn-primary">
-                            <i class="fas fa-plus"></i> Add Watch Record
-                        </a>
+            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+                <!-- Toast notification for success/error messages -->
+                <?php if (isset($success_message)): ?>
+                <div class="toast show bg-success text-white" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="toast-header bg-success text-white">
+                        <strong class="me-auto">Success</strong>
+                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                    <div class="toast-body">
+                        <?php echo $success_message; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
+                
+                <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
+                    <h1 class="h2">Film Watch Status Dashboard</h1>
+                    <div class="btn-toolbar mb-2 mb-md-0">
+                        <div class="btn-group me-2">
+                            <a href="add_watch.php" class="btn btn-sm btn-outline-primary">
+                                <i class="fas fa-plus"></i> Add New Watch
+                            </a>
+                        </div>
                         <div class="dropdown">
-                            <button class="btn btn-outline-secondary dropdown-toggle" type="button" id="exportDropdown" data-bs-toggle="dropdown" aria-expanded="false">
-                                <i class="fas fa-file-export"></i> Export
-                            </button>
-                            <ul class="dropdown-menu" aria-labelledby="exportDropdown">
-                                <li><a class="dropdown-item" href="export_watch.php?format=csv">CSV</a></li>
-                                <li><a class="dropdown-item" href="export_watch.php?format=pdf">PDF</a></li>
-                                <li><a class="dropdown-item" href="export_watch.php?format=excel">Excel</a></li>
-                            </ul>
+                            <form action="" method="GET" id="filterForm">
+                                <select name="filter" class="form-select form-select-sm" onchange="document.getElementById('filterForm').submit()">
+                                    <option value="">Filter Options</option>
+                                    <option value="all" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'all' ? 'selected' : ''; ?>>All</option>
+                                    <option value="watched" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'watched' ? 'selected' : ''; ?>>Watched</option>
+                                    <option value="unwatched" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'unwatched' ? 'selected' : ''; ?>>Unwatched</option>
+                                    <option value="highest" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'highest' ? 'selected' : ''; ?>>Highest Rated</option>
+                                    <option value="recent" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'recent' ? 'selected' : ''; ?>>Recently Added</option>
+                                </select>
+                            </form>
                         </div>
                     </div>
                 </div>
 
-                <!-- Search & Filter Bar -->
-                <div class="card mb-4">
-                    <div class="card-body">
-                        <div class="row g-3">
-                            <div class="col-md-6">
-                                <form action="" method="GET" class="d-flex">
-                                    <input type="text" name="search" class="form-control search-box me-2" placeholder="Search by film ID..." value="<?php echo isset($_GET['search']) ? htmlspecialchars($_GET['search']) : ''; ?>">
-                                    <button type="submit" class="btn btn-primary search-btn">
-                                        <i class="fas fa-search"></i>
-                                    </button>
-                                </form>
-                            </div>
-                            <div class="col-md-6">
-                                <form action="" method="GET" class="d-flex">
-                                    <select name="filter" class="form-select me-2" onchange="this.form.submit()">
-                                        <option value="">Filter Options</option>
-                                        <option value="all" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'all' ? 'selected' : ''; ?>>All</option>
-                                        <option value="watched" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'watched' ? 'selected' : ''; ?>>Watched</option>
-                                        <option value="unwatched" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'unwatched' ? 'selected' : ''; ?>>Unwatched</option>
-                                        <option value="highest" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'highest' ? 'selected' : ''; ?>>Highest Rated</option>
-                                        <option value="recent" <?php echo isset($_GET['filter']) && $_GET['filter'] == 'recent' ? 'selected' : ''; ?>>Recently Added</option>
-                                    </select>
-                                    <?php if(isset($_GET['filter']) && !empty($_GET['filter'])): ?>
-                                    <a href="watch-status.php" class="btn btn-outline-secondary">
-                                        <i class="fas fa-times"></i> Clear
-                                    </a>
-                                    <?php endif; ?>
-                                </form>
-                            </div>
-                        </div>
-                    </div>
+                <?php if (isset($error_message)): ?>
+                <div class="alert alert-danger" role="alert">
+                    <?php echo $error_message; ?>
                 </div>
+                <?php endif; ?>
 
                 <!-- Stats Cards -->
-                <div class="row g-4 mb-4">
-                    <div class="col-md-3">
-                        <div class="dashboard-card bg-primary text-white">
+                <div class="row mb-4">
+                    <div class="col-md-3 mb-3">
+                        <div class="card dashboard-card bg-primary text-white h-100">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
-                                        <h6 class="text-uppercase fw-bold mb-1 opacity-75">Total Records</h6>
-                                        <h2 class="mb-0"><?php echo $stats['total_films']; ?></h2>
-                                        <p class="mb-0 mt-2 small">Film watch entries</p>
+                                        <h6 class="text-uppercase fw-bold mb-1">Total Records</h6>
+                                        <h3 class="mb-0"><?php echo $stats['total_films']; ?></h3>
                                     </div>
-                                    <div class="stat-icon">
-                                        <i class="fas fa-film fa-lg"></i>
+                                    <div class="film-icon-container bg-primary bg-opacity-25">
+                                        <i class="fas fa-film fa-2x"></i>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3">
-                        <div class="dashboard-card bg-success text-white">
+                    <div class="col-md-3 mb-3">
+                        <div class="card dashboard-card bg-success text-white h-100">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
-                                        <h6 class="text-uppercase fw-bold mb-1 opacity-75">Watched</h6>
-                                        <h2 class="mb-0"><?php echo $stats['watched_films']; ?></h2>
-                                        <p class="mb-0 mt-2 small">
-                                            <?php 
-                                            $watchedPercentage = ($stats['total_films'] > 0) ? 
-                                                round(($stats['watched_films'] / $stats['total_films']) * 100) : 0;
-                                            echo $watchedPercentage . '% completion';
-                                            ?>
-                                        </p>
+                                        <h6 class="text-uppercase fw-bold mb-1">Watched</h6>
+                                        <h3 class="mb-0"><?php echo $stats['watched_films']; ?></h3>
                                     </div>
-                                    <div class="stat-icon">
-                                        <i class="fas fa-check-circle fa-lg"></i>
+                                    <div class="film-icon-container bg-success bg-opacity-25">
+                                        <i class="fas fa-check-circle fa-2x"></i>
                                     </div>
-                                </div>
-                                <div class="progress mt-3">
-                                    <div class="progress-bar bg-light" role="progressbar" style="width: <?php echo $watchedPercentage; ?>%" 
-                                         aria-valuenow="<?php echo $watchedPercentage; ?>" aria-valuemin="0" aria-valuemax="100"></div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3">
-                        <div class="dashboard-card bg-warning text-white">
+                    <div class="col-md-3 mb-3">
+                        <div class="card dashboard-card bg-warning text-white h-100">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
-                                        <h6 class="text-uppercase fw-bold mb-1 opacity-75">Avg Rating</h6>
-                                        <h2 class="mb-0"><?php echo $stats['avg_rating'] ? $stats['avg_rating'] : '0.0'; ?></h2>
-                                        <p class="mb-0 mt-2 small">Out of 10 points</p>
+                                        <h6 class="text-uppercase fw-bold mb-1">Avg Rating</h6>
+                                        <h3 class="mb-0"><?php echo $stats['avg_rating'] ? $stats['avg_rating'] : '0.0'; ?> <small>/10</small></h3>
                                     </div>
-                                    <div class="stat-icon">
-                                        <i class="fas fa-star fa-lg"></i>
+                                    <div class="film-icon-container bg-warning bg-opacity-25">
+                                        <i class="fas fa-star fa-2x"></i>
                                     </div>
-                                </div>
-                                <?php 
-                                $ratingPercentage = ($stats['avg_rating']) ? ($stats['avg_rating'] / 10) * 100 : 0;
-                                ?>
-                                <div class="progress mt-3">
-                                    <div class="progress-bar bg-light" role="progressbar" style="width: <?php echo $ratingPercentage; ?>%" 
-                                         aria-valuenow="<?php echo $ratingPercentage; ?>" aria-valuemin="0" aria-valuemax="100"></div>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <div class="col-md-3">
-                        <div class="dashboard-card bg-info text-white">
+                    <div class="col-md-3 mb-3">
+                        <div class="card dashboard-card bg-info text-white h-100">
                             <div class="card-body">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div>
-                                        <h6 class="text-uppercase fw-bold mb-1 opacity-75">Unique Films</h6>
-                                        <h2 class="mb-0"><?php echo $stats['unique_films']; ?></h2>
-                                        <p class="mb-0 mt-2 small">Different titles tracked</p>
+                                        <h6 class="text-uppercase fw-bold mb-1">Unique Films</h6>
+                                        <h3 class="mb-0"><?php echo $stats['unique_films']; ?></h3>
                                     </div>
-                                    <div class="stat-icon">
-                                        <i class="fas fa-fingerprint fa-lg"></i>
+                                    <div class="film-icon-container bg-info bg-opacity-25">
+                                        <i class="fas fa-fingerprint fa-2x"></i>
                                     </div>
                                 </div>
                             </div>
@@ -518,20 +384,26 @@ $stats = $statsResult->fetch_assoc();
                     </div>
                 </div>
 
+                <!-- Main dashboard content -->
                 <div class="row">
-                    <div class="col-lg-8">
+                    <div class="col-lg-12">
                         <!-- Watch Status Table -->
-                        <div class="card">
+                        <div class="card mb-4">
                             <div class="card-header d-flex justify-content-between align-items-center">
-                                <div><i class="fas fa-table me-2"></i> Watch Records</div>
-                                <div class="text-muted small">Showing <?php echo min($perPage, $totalRecords); ?> of <?php echo $totalRecords; ?> records</div>
+                                <div>
+                                    <i class="fas fa-table me-1"></i>
+                                    Watch Status List
+                                </div>
+                                <div>
+                                    <input type="text" id="tableSearch" class="form-control form-control-sm" placeholder="Search...">
+                                </div>
                             </div>
                             <div class="card-body">
                                 <div class="table-responsive">
-                                    <table class="table table-hover align-middle">
+                                    <table class="table table-striped table-hover" id="watchTable">
                                         <thead>
                                             <tr>
-                                                <th>Film ID</th>
+                                                <th>Film</th>
                                                 <th>Watch Date</th>
                                                 <th>Status</th>
                                                 <th>Rating</th>
@@ -541,12 +413,11 @@ $stats = $statsResult->fetch_assoc();
                                         </thead>
                                         <tbody>
                                             <?php
-                                            if ($result->num_rows > 0) {
-                                                while($row = $result->fetch_assoc()) {
+                                            if ($result && mysqli_num_rows($result) > 0) {
+                                                while($row = mysqli_fetch_assoc($result)) {
                                                     echo "<tr>";
-                                                    echo "<td><strong>" . htmlspecialchars($row["film_id"]) . "</strong></td>";
-                                                    echo "<td>" . ($row["watch_date"] ? date("M d, Y", strtotime($row["watch_date"])) : 
-                                                        "<span class='text-muted'>Not set</span>") . "</td>";
+                                                    echo "<td>" . (isset($row["film_title"]) ? htmlspecialchars($row["film_title"]) : "Film #" . htmlspecialchars($row["film_id"])) . "</td>";
+                                                    echo "<td>" . ($row["watch_date"] ? date("M d, Y", strtotime($row["watch_date"])) : "Not set") . "</td>";
                                                     echo "<td>";
                                                     if ($row["is_watched"] == 1) {
                                                         echo '<span class="badge watched-badge">Watched</span>';
@@ -571,29 +442,27 @@ $stats = $statsResult->fetch_assoc();
                                                         for ($i = 0; $i < $emptyStars; $i++) {
                                                             echo '<i class="far fa-star rating-empty"></i>';
                                                         }
-                                                        echo " <span class='text-muted small'>(" . $rating . ")</span>";
+                                                        echo " <span class='text-muted'>(" . $rating . "/10)</span>";
                                                     } else {
                                                         echo "<span class='text-muted'>Not rated</span>";
                                                     }
                                                     echo "</td>";
                                                     echo "<td>";
                                                     if (!empty($row["notes"])) {
-                                                        echo '<span class="notes-ellipsis" data-bs-toggle="tooltip" title="' . 
-                                                            htmlspecialchars($row["notes"]) . '">' . 
+                                                        echo '<span class="truncate-text" title="' . htmlspecialchars($row["notes"]) . '">' . 
                                                             htmlspecialchars(substr($row["notes"], 0, 50)) . 
-                                                            (strlen($row["notes"]) > 50 ? '...' : '') . '</span>';
+                                                            (strlen($row["notes"]) > 50 ? '...' : '') . 
+                                                            '</span>';
                                                     } else {
                                                         echo "<span class='text-muted'>No notes</span>";
                                                     }
                                                     echo "</td>";
                                                     echo "<td>
                                                         <div class='btn-group'>
-                                                            <a href='edit_watch.php?id=" . $row["watch_id"] . "' class='btn btn-sm btn-outline-primary' 
-                                                               data-bs-toggle='tooltip' title='Edit'>
+                                                            <a href='edit_watch.php?id=" . $row["watch_id"] . "' class='btn btn-sm btn-primary'>
                                                                 <i class='fas fa-edit'></i>
                                                             </a>
-                                                            <button type='button' class='btn btn-sm btn-outline-danger delete-btn' 
-                                                                data-id='" . $row["watch_id"] . "' data-bs-toggle='tooltip' title='Delete'>
+                                                            <button class='btn btn-sm btn-danger delete-btn' data-id='" . $row["watch_id"] . "' data-title='" . (isset($row["film_title"]) ? htmlspecialchars($row["film_title"]) : "Film #" . htmlspecialchars($row["film_id"])) . "'>
                                                                 <i class='fas fa-trash'></i>
                                                             </button>
                                                         </div>
@@ -601,109 +470,232 @@ $stats = $statsResult->fetch_assoc();
                                                     echo "</tr>";
                                                 }
                                             } else {
-                                                echo "<tr><td colspan='6' class='text-center py-4'>
-                                                    <div class='text-muted'>
-                                                        <i class='fas fa-search fa-2x mb-3'></i>
-                                                        <p>No watch records found</p>
-                                                    </div>
-                                                </td></tr>";
+                                                echo "<tr><td colspan='6' class='text-center'>No watch records found</td></tr>";
                                             }
                                             ?>
                                         </tbody>
                                     </table>
                                 </div>
-                                
-                                <!-- Pagination -->
-                                <?php if ($totalPages > 1): ?>
-                                <nav aria-label="Page navigation">
-                                    <ul class="pagination">
-                                        <li class="page-item <?php echo ($page <= 1) ? 'disabled' : ''; ?>">
-                                            <a class="page-link" href="?page=<?php echo $page-1; ?><?php echo isset($_GET['filter']) ? '&filter='.$_GET['filter'] : ''; ?><?php echo isset($_GET['search']) ? '&search='.$_GET['search'] : ''; ?>" aria-label="Previous">
-                                                <span aria-hidden="true">&laquo;</span>
-                                            </a>
-                                        </li>
-                                        
-                                        <?php for($i = 1; $i <= $totalPages; $i++): ?>
-                                        <li class="page-item <?php echo ($page == $i) ? 'active' : ''; ?>">
-                                            <a class="page-link" href="?page=<?php echo $i; ?><?php echo isset($_GET['filter']) ? '&filter='.$_GET['filter'] : ''; ?><?php echo isset($_GET['search']) ? '&search='.$_GET['search'] : ''; ?>">
-                                                <?php echo $i; ?>
-                                            </a>
-                                        </li>
-                                        <?php endfor; ?>
-                                        
-                                        <li class="page-item <?php echo ($page >= $totalPages) ? 'disabled' : ''; ?>">
-                                            <a class="page-link" href="?page=<?php echo $page+1; ?><?php echo isset($_GET['filter']) ? '&filter='.$_GET['filter'] : ''; ?><?php echo isset($_GET['search']) ? '&search='.$_GET['search'] : ''; ?>" aria-label="Next">
-                                                <span aria-hidden="true">&raquo;</span>
-                                            </a>
-                                        </li>
-                                    </ul>
-                                </nav>
-                                <?php endif; ?>
+                            </div>
+                        </div>
+                        
+                       
+                    </div>
+                    <div class="col-lg-8">
+                         <!-- Watch Records by Month -->
+                         <div class="card mb-4">
+                            <div class="card-header">
+                                <i class="fas fa-calendar me-1"></i>
+                                Watch Records by Month
+                            </div>
+                            <div class="card-body">
+                                <div class="table-responsive">
+                                    <table class="table table-bordered">
+                                        <thead>
+                                            <tr>
+                                                <th>Month</th>
+                                                <th>Total Records</th>
+                                                <th>Watched</th>
+                                                <th>Not Watched</th>
+                                                <th>Avg Rating</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            <?php
+                                            if ($monthlyResult && mysqli_num_rows($monthlyResult) > 0) {
+                                                while($monthRow = mysqli_fetch_assoc($monthlyResult)) {
+                                                    echo "<tr>";
+                                                    echo "<td>" . date("F Y", strtotime($monthRow["month_year"] . "-01")) . "</td>";
+                                                    echo "<td>" . $monthRow["total"] . "</td>";
+                                                    echo "<td>" . $monthRow["watched"] . "</td>";
+                                                    echo "<td>" . $monthRow["not_watched"] . "</td>";
+                                                    echo "<td>" . ($monthRow["avg_rating"] ? $monthRow["avg_rating"] : "N/A") . "</td>";
+                                                    echo "</tr>";
+                                                }
+                                            } else {
+                                                echo "<tr><td colspan='5' class='text-center'>No monthly data available</td></tr>";
+                                            }
+                                            ?>
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     </div>
                     
                     <div class="col-lg-4">
-                        <!-- Recent Activity Card -->
+                        <!-- Recently Added -->
                         <div class="card mb-4">
                             <div class="card-header">
-                                <i class="fas fa-clock me-2"></i> Watch Activity
+                                <i class="fas fa-clock me-1"></i>
+                                Recently Added
                             </div>
-                            <div class="card-body p-0">
-                                <div class="chart-container p-3">
-                                    <canvas id="watchActivityChart"></canvas>
+                            <div class="card-body">
+                                <div class="list-group">
+                                    <?php
+                                    if ($recentFilmsResult && mysqli_num_rows($recentFilmsResult) > 0) {
+                                        while($recentFilm = mysqli_fetch_assoc($recentFilmsResult)) {
+                                            echo '<div class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">';
+                                            echo '<div>';
+                                            echo '<h6 class="mb-1">' . htmlspecialchars($recentFilm["title"] ?? "Film #" . $recentFilm["film_id"]) . '</h6>';
+                                            echo '<small class="text-muted">' . ($recentFilm["watch_date"] ? date("M d, Y", strtotime($recentFilm["watch_date"])) : "No date") . '</small>';
+                                            echo '</div>';
+                                            if ($recentFilm["is_watched"] == 1) {
+                                                echo '<span class="badge watched-badge">Watched</span>';
+                                            } else {
+                                                echo '<span class="badge not-watched-badge">Not Watched</span>';
+                                            }
+                                            echo '</div>';
+                                        }
+                                    } else {
+                                        echo '<div class="list-group-item">No recent films</div>';
+                                    }
+                                    ?>
                                 </div>
                             </div>
                         </div>
-                        
-                        <!-- Rating Distribution Card -->
-                        <div class="card">
+
+                        <!-- Rating Distribution -->
+                        <div class="card mb-4">
                             <div class="card-header">
-                                <i class="fas fa-star me-2"></i> Rating Distribution
+                                <i class="fas fa-star me-1"></i>
+                                Rating Distribution
                             </div>
-                            <div class="card-body p-0">
-                                <div class="chart-container p-3">
-                                    <canvas id="ratingDistributionChart"></canvas>
-                                </div>
+                            <div class="card-body">
+                                <?php
+                                if (count($ratingData) > 0) {
+                                    // Display the distribution
+                                    foreach ($ratingData as $row) {
+                                        if ($row["rating_range"] != 'Not Rated') {
+                                            $percentage = $totalRated > 0 ? round(($row["count"] / $totalRated) * 100, 1) : 0;
+                                            
+                                            // Define color based on rating range
+                                            $barColor = '';
+                                            switch ($row["rating_range"]) {
+                                                case '0-2': $barColor = 'danger'; break;
+                                                case '2.1-4': $barColor = 'warning'; break;
+                                                case '4.1-6': $barColor = 'info'; break;
+                                                case '6.1-8': $barColor = 'primary'; break;
+                                                case '8.1-10': $barColor = 'success'; break;
+                                                default: $barColor = 'secondary';
+                                            }
+                                            
+                                            echo '<div class="mb-3">';
+                                            echo '<div class="d-flex justify-content-between mb-1">';
+                                            echo '<span>' . $row["rating_range"] . ' / 10</span>';
+                                            echo '<span>' . $row["count"] . ' films (' . $percentage . '%)</span>';
+                                            echo '</div>';
+                                            echo '<div class="progress">';
+                                            echo '<div class="progress-bar bg-' . $barColor . '" role="progressbar" style="width: ' . $percentage . '%" aria-valuenow="' . $percentage . '" aria-valuemin="0" aria-valuemax="100"></div>';
+                                            echo '</div>';
+                                            echo '</div>';
+                                        }
+                                    }
+                                    
+                                    // Show Not Rated count separately
+                                    foreach ($ratingData as $row) {
+                                        if ($row["rating_range"] == 'Not Rated') {
+                                            echo '<div class="alert alert-secondary mt-3" role="alert">';
+                                            echo 'Not Rated: ' . $row["count"] . ' films';
+                                            echo '</div>';
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    echo '<div class="text-center">No rating data available</div>';
+                                }
+                                ?>
                             </div>
                         </div>
                     </div>
                 </div>
+            </main>
+        </div>
+    </div>
 
-                <!-- Watch Records by Month -->
-                <div class="card">
-                    <div class="card-header">
-                        <i class="fas fa-calendar me-2"></i> Monthly Statistics
-                    </div>
-                    <div class="card-body">
-                        <div class="table-responsive">
-                            <table class="table table-bordered">
-                                <thead>
-                                    <tr>
-                                        <th>Month</th>
-                                        <th>Total Records</th>
-                                        <th>Watched</th>
-                                        <th>Not Watched</th>
-                                        <th>Avg Rating</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php
-                                    // Get monthly statistics
-                                    $monthlyStats = "SELECT 
-                                        DATE_FORMAT(watch_date, '%Y-%m') as month_year,
-                                        COUNT(*) as total,
-                                        SUM(CASE WHEN is_watched = 1 THEN 1 ELSE 0 END) as watched,
-                                        SUM(CASE WHEN is_watched = 0 THEN 1 ELSE 0 END) as not_watched,
-                                        ROUND(AVG(personal_rating), 1) as avg_rating
-                                    FROM watchstatus
-                                    WHERE watch_date IS NOT NULL
-                                    GROUP BY DATE_FORMAT(watch_date, '%Y-%m')
-                                    ORDER BY month_year DESC
-                                    LIMIT 6";
-                                    
-                                    $monthlyResult = $conn->query($monthlyStats);
-                                    
-                                    if ($monthlyResult->num_rows > 0) {
-                                        while($monthRow = $monthlyResult->fetch_assoc()) {
-                                            
+    <!-- Delete Confirmation Modal -->
+    <div class="modal fade" id="deleteModal" tabindex="-1" aria-labelledby="deleteModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="deleteModalLabel">Confirm Delete</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    Are you sure you want to delete the record for "<span id="deleteItemTitle"></span>"?
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <a href="#" id="confirmDeleteBtn" class="btn btn-danger">Delete</a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap Bundle with Popper -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <!-- JavaScript for delete confirmation -->
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Auto-dismiss toast after 3 seconds
+            var toastElement = document.querySelector('.toast');
+            if (toastElement) {
+                setTimeout(function() {
+                    var toast = bootstrap.Toast.getInstance(toastElement);
+                    if (toast) {
+                        toast.hide();
+                    }
+                }, 3000);
+            }
+            
+            // Setup delete confirmation
+            var deleteModal = new bootstrap.Modal(document.getElementById('deleteModal'));
+            var deleteButtons = document.querySelectorAll('.delete-btn');
+            
+            deleteButtons.forEach(function(button) {
+                button.addEventListener('click', function() {
+                    var id = this.getAttribute('data-id');
+                    var title = this.getAttribute('data-title');
+                    
+                    document.getElementById('deleteItemTitle').textContent = title;
+                    document.getElementById('confirmDeleteBtn').href = 'watch-status.php?delete_id=' + id;
+                    
+                    deleteModal.show();
+                });
+            });
+            
+            // Setup table search functionality
+            var searchInput = document.getElementById('tableSearch');
+            if (searchInput) {
+                searchInput.addEventListener('keyup', function() {
+                    var filter = this.value.toLowerCase();
+                    var table = document.getElementById('watchTable');
+                    var tr = table.getElementsByTagName('tr');
+                    
+                    for (var i = 0; i < tr.length; i++) {
+                        if (i === 0) continue; // Skip header row
+                        
+                        var td = tr[i].getElementsByTagName('td');
+                        var found = false;
+                        
+                        for (var j = 0; j < td.length; j++) {
+                            if (td[j].textContent.toLowerCase().indexOf(filter) > -1) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        
+                        tr[i].style.display = found ? '' : 'none';
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>
+
+<?php
+// Close the database connection
+mysqli_close($conn);
+?>

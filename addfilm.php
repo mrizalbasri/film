@@ -39,7 +39,7 @@ if(isset($_POST['submit'])) {
               VALUES ('$title', '$release_year', '$genre_id', '$director', '$duration', '$rating', '$poster_url', '$synopsis', NOW())";
     
     if(mysqli_query($conn, $query)) {
-        header("Location: index.php?message=Film berhasil ditambahkan");
+        header("Location: filim.php?message=Film berhasil ditambahkan");
         exit();
     } else {
         $error = "Error: " . mysqli_error($conn);
@@ -62,14 +62,14 @@ if(isset($_POST['submit'])) {
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar (sudah ada dengan include) -->
-            <?php include 'includes/sidebar.php'; ?>
+           
             
             <!-- Konten Utama -->
-            <main class="col-md-9 ms-sm-auto col-lg-10 px-md-4 py-4">
+            <main class="col-md-12 ms-sm-auto col-lg-12 px-md-4 py-4">
                 <div class="d-flex justify-content-between flex-wrap flex-md-nowrap align-items-center pt-3 pb-2 mb-3 border-bottom">
                     <h1 class="h2">Tambah Film Baru</h1>
                     <div class="btn-toolbar mb-2 mb-md-0">
-                        <a href="index.php" class="btn btn-secondary">
+                        <a href="filim.php" class="btn btn-secondary">
                             <i class="bi bi-arrow-left"></i> Kembali
                         </a>
                     </div>
